@@ -47,6 +47,9 @@ def _train(args):
         ],
     )
 
+    # Updated the dataset to CIFAR-100 and adjusted the log name for the experiment.
+    args["dataset"] = "cifar100"
+    args["log_name"] = "experiment_without_pic"
 
     _set_random()
     _set_device(args)

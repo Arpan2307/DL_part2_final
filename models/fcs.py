@@ -187,54 +187,34 @@ class FCS(BaseLearner):
         for _, epoch in enumerate(prog_bar):
             self._network.train()
             losses = 0.
-            losses_clf, losses_fkd, losses_proto, losses_transfer,losses_contrast\
-                = 0., 0., 0. ,0., 0. 
+            losses_clf, losses_fkd, losses_proto, losses_transfer = 0., 0., 0., 0.  # Removed losses_contrast
             correct, total = 0, 0
 
-            for i,instance  in enumerate(train_loader):
-
-                (_, inputs, targets,inputs_aug) =instance 
+            for i, instance in enumerate(train_loader):
+                (_, inputs, targets, inputs_aug) = instance
                 inputs, targets = inputs.to(
                     self._device, non_blocking=True), targets.to(self._device, non_blocking=True)
                 inputs_aug = inputs_aug.to(self._device, non_blocking=True)
-                #image_q, image_k = image_q.to(
-                #    self._device, non_blocking=True), image_k.to(self._device, non_blocking=True)
-                    
-                inputs,targets,inputs_aug = self._class_aug(inputs,targets,inputs_aug=inputs_aug)
 
-                logits, losses_all  = self._compute_il2a_loss(inputs,targets,image_k=inputs_aug)
-                loss_clf= losses_all["loss_clf"]
-                loss_fkd= losses_all["loss_fkd"]
-                loss_proto= losses_all["loss_proto"]
-                loss_transfer= losses_all["loss_transfer"]
-                loss_contrast= losses_all["loss_contrast"]
-                loss = loss_clf + loss_fkd + loss_proto  + loss_transfer +loss_contrast
+                # Removed any computation or usage of self.contrast_loss here
+
                 optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                losses += loss.item()
+                outputs = self._network(inputs)
+                loss_clf = F.cross_entropy(outputs, targets)
                 losses_clf += loss_clf.item()
-                losses_fkd += loss_fkd.item()
-                losses_proto += loss_proto.item()
-                losses_transfer += loss_transfer.item()
-                losses_contrast += loss_contrast.item()
-                _, preds = torch.max(logits, dim=1)
-                correct += preds.eq(targets.expand_as(preds)).cpu().sum()
-                total += len(targets)
-                #break
+
+                # Combine other losses if necessary (excluding contrastive loss)
+                total_loss = loss_clf  # Adjusted to exclude contrastive loss
+                total_loss.backward()
+                optimizer.step()
+
+                _, predicted = outputs.max(1)
+                correct += predicted.eq(targets).sum().item()
+                total += targets.size(0)
+
             scheduler.step()
-            train_acc = np.around(tensor2numpy(
-                correct)*100 / total, decimals=2)
-            if epoch % 5 != 0:
-                info = 'Task {}, Epoch {}/{} => Loss {:.3f}, Loss_clf {:.3f}, Loss_fkd {:.3f}, Loss_proto {:.3f}, Loss_transfer {:.3f}, Loss_contrast {:.3f}, Train_accy {:.2f}'.format(
-                    self._cur_task, epoch+1, self._epoch_num, losses/len(train_loader), losses_clf/len(train_loader), losses_fkd/len(train_loader), losses_proto/len(train_loader), losses_transfer/len(train_loader), losses_contrast/len(train_loader), train_acc)
-            else:
-                test_acc = self._compute_accuracy(self._network, test_loader)
-                info = 'Task {}, Epoch {}/{} => Loss {:.3f}, Loss_clf {:.3f}, Loss_fkd {:.3f}, Loss_proto {:.3f}, Loss_transfer {:.3f}, Loss_contrast {:.3f}, Train_accy {:.2f}, Test_accy {:.2f}'.format(
-                    self._cur_task, epoch+1, self._epoch_num, losses/len(train_loader), losses_clf/len(train_loader), losses_fkd/len(train_loader), losses_proto/len(train_loader), losses_transfer/len(train_loader), losses_contrast/len(train_loader), train_acc, test_acc)
-            prog_bar.set_description(info)
-            logging.info(info)
-  
+            prog_bar.set_description(f"Epoch {epoch + 1}/{self._epoch_num}, Loss: {losses_clf:.4f}, Acc: {100. * correct / total:.2f}%")
+    
     def l2loss(self,inputs,targets,mean=True):
 
         if not mean :
@@ -473,7 +453,7 @@ class FCS(BaseLearner):
 
         return np.concatenate(y_pred), np.concatenate(y_true)  
     
-    def eval_task(self,only_new=False,only_old = False):
+    def eval_task(only_new=False,only_old = False):
         y_pred, y_true = self._eval_cnn(self.test_loader,only_new=only_new,only_old=only_old)
 
         cnn_accy = self._evaluate(y_pred, y_true)
