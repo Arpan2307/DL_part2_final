@@ -233,128 +233,61 @@ class FCS(BaseLearner):
         ):
             param_k.data =  param_q.data
     
-    def _compute_il2a_loss(self,inputs, targets,image_k=None):
-        loss_clf,loss_fkd,loss_proto,loss_transfer,loss_contrast= \
-            torch.tensor(0.) , torch.tensor(0.) , torch.tensor(0.) , torch.tensor(0.) , torch.tensor(0.) 
-        
-        network_output = self._network(inputs)
-        
-        features = network_output["features"]
-        
-        if image_k!=None and (self._cur_task==0):
-            b = image_k.shape[0]
-            targets_part = targets[:b].clone()
-            
-            with torch.no_grad():
-                #a_ = self._network.convnet.layer4[1].bn1.running_mean
+    def _compute_il2a_loss(self, inputs, targets, image_k=None):
+    loss_clf, loss_fkd, loss_proto, loss_transfer = (
+        torch.tensor(0.), torch.tensor(0.), torch.tensor(0.), torch.tensor(0.)
+    )
 
-                self._copy_key_encoder()
-                #self.encoder_k.to(self._device)
-                #features_q_ = self._network(image_k)["features"]
-                features_k = self.encoder_k(image_k)["features"]
-                features_k = nn.functional.normalize(features_k, dim=-1)
+    network_output = self._network(inputs)
+    features = network_output["features"]
+    logits = network_output["logits"]
 
-            features_q = nn.functional.normalize(features[:b], dim=-1)
+    # Classification loss
+    loss_clf = F.cross_entropy(logits / self.args["temp"], targets)
 
-            l_pos_global = (features_q * features_k).sum(-1).view(-1, 1)
-
-            l_neg_global = torch.einsum('nc,ck->nk', [features_q, features_k.T])
-  
-            # logits: Nx(1+K)
-            logits_global = torch.cat([l_pos_global, l_neg_global], dim=1)
-
-            # apply temperature
-            logits_global /= self.args["contrast_T"]
-
-            # one-hot target from augmented image
-            positive_target = torch.ones((b, 1)).cuda()
-            # find same label images from label queue
-            # for the query with -1, all 
-            negative_targets = ((targets_part[:, None] == targets_part[None, :]) & (targets_part[:, None] != -1)).float().cuda()
-            targets_global = torch.cat([positive_target, negative_targets], dim=1)
-
-            loss_contrast = self.contrast_loss(logits_global, targets_global)*self.args["lambda_contrast"]
-            
-        #print(network_output.keys())
-        logits = network_output["logits"]
-        loss_clf = F.cross_entropy(logits/self.args["temp"], targets)
-
-        if self._cur_task != 0:
-            features_old = self.old_network_module_ptr.extract_vector(inputs)
-
-
-
-        if self._cur_task == 0:
-            losses_all = { 
+    # Task 0: No distillation or prototype-related loss
+    if self._cur_task == 0:
+        losses_all = {
             "loss_clf": loss_clf,
             "loss_fkd": loss_fkd,
             "loss_proto": loss_proto,
             "loss_transfer": loss_transfer,
-            "loss_contrast": loss_contrast,
         }
-            return logits, losses_all
-        
-        
+        return logits, losses_all
 
-        feature_transfer = self._network.transfer(features_old)["logits"]
-        loss_transfer = self.args["lambda_transfer"] * self.l2loss(features,feature_transfer) 
+    # For tasks > 0
+    features_old = self.old_network_module_ptr.extract_vector(inputs)
 
-      
-        loss_fkd = self.args["lambda_fkd"] * self.l2loss(features,features_old,mean=False) 
-        
-        index = np.random.choice(range(self._known_classes),size=self.args["batch_size"],replace=True)
-    
-        proto_features_raw = np.array(self._protos)[index]
-        proto_targets = index*4
+    # Transfer loss
+    feature_transfer = self._network.transfer(features_old)["logits"]
+    loss_transfer = self.args["lambda_transfer"] * self.l2loss(features, feature_transfer)
 
-        proto_features = proto_features_raw + np.random.normal(0,1,proto_features_raw.shape)*self._radius
-        proto_features = torch.from_numpy(proto_features).float().to(self._device,non_blocking=True)
-        proto_targets = torch.from_numpy(proto_targets).to(self._device,non_blocking=True)
+    # Feature KD loss
+    loss_fkd = self.args["lambda_fkd"] * self.l2loss(features, features_old, mean=False)
 
-        proto_features_transfer = self._network.transfer(proto_features)["logits"].detach().clone()
-        proto_logits = self._network_module_ptr.fc(proto_features_transfer)["logits"][:,:self._total_classes*4]
-    
-        loss_proto = self.args["lambda_proto"] * F.cross_entropy(proto_logits/self.args["temp"], proto_targets)
+    # Prototype loss
+    index = np.random.choice(range(self._known_classes), size=self.args["batch_size"], replace=True)
+    proto_features_raw = np.array(self._protos)[index]
+    proto_targets = index * 4
 
-        if image_k!=None and (self._cur_task>0 ):
-            b = image_k.shape[0]
-            targets_part = targets[:b].clone()
-            targets_part_neg = targets[:b].clone()
-            with torch.no_grad():
+    proto_features = proto_features_raw + np.random.normal(0, 1, proto_features_raw.shape) * self._radius
+    proto_features = torch.from_numpy(proto_features).float().to(self._device, non_blocking=True)
+    proto_targets = torch.from_numpy(proto_targets).to(self._device, non_blocking=True)
 
-                self._copy_key_encoder()
-                features_k = self.encoder_k(image_k)["features"]
-                features_k = torch.cat((features_k,proto_features),dim=0)
-                features_k = nn.functional.normalize(features_k, dim=-1)
-                targets_part_neg = torch.cat((targets_part_neg,proto_targets),dim=0)
-            #print(features_k.shape,targets_part_neg.shape,b,proto_features.shape)
-            features_q = nn.functional.normalize(features[:b], dim=-1)
-            
-            l_pos_global = (features_q * features_k[:b]).sum(-1).view(-1, 1)
-            l_neg_global = torch.einsum('nc,ck->nk', [features_q, features_k.T])
+    proto_features_transfer = self._network.transfer(proto_features)["logits"].detach().clone()
+    proto_logits = self._network_module_ptr.fc(proto_features_transfer)["logits"][:, :self._total_classes * 4]
 
-            # logits: Nx(1+K)
-            logits_global = torch.cat([l_pos_global, l_neg_global], dim=1)
-            # apply temperature
-            logits_global /= self.args["contrast_T"]
+    loss_proto = self.args["lambda_proto"] * F.cross_entropy(proto_logits / self.args["temp"], proto_targets)
 
-            # one-hot target from augmented image
-            positive_target = torch.ones((b, 1)).cuda()
-            # find same label images from label queue
-            # for the query with -1, all 
-            negative_targets = ((targets_part[:, None] == targets_part_neg[None, :]) & (targets_part[:, None] != -1)).float().cuda()
-            targets_global = torch.cat([positive_target, negative_targets], dim=1)
-            loss_contrast = self.contrast_loss(logits_global, targets_global)*self.args["lambda_contrast"]
+    losses_all = {
+        "loss_clf": loss_clf,
+        "loss_fkd": loss_fkd,
+        "loss_proto": loss_proto,
+        "loss_transfer": loss_transfer,
+    }
 
-        losses_all = { 
-            "loss_clf": loss_clf,
-            "loss_fkd": loss_fkd,
-            "loss_proto": loss_proto,
-            "loss_transfer": loss_transfer,
-            "loss_contrast":loss_contrast,
-        }
-        
-        return logits, losses_all 
+    return logits, losses_all
+
 
 
 
