@@ -234,59 +234,59 @@ class FCS(BaseLearner):
             param_k.data =  param_q.data
     
     def _compute_il2a_loss(self, inputs, targets, image_k=None):
-    loss_clf, loss_fkd, loss_proto, loss_transfer = (
-        torch.tensor(0.), torch.tensor(0.), torch.tensor(0.), torch.tensor(0.)
-    )
-
-    network_output = self._network(inputs)
-    features = network_output["features"]
-    logits = network_output["logits"]
-
-    # Classification loss
-    loss_clf = F.cross_entropy(logits / self.args["temp"], targets)
-
-    # Task 0: No distillation or prototype-related loss
-    if self._cur_task == 0:
+        loss_clf, loss_fkd, loss_proto, loss_transfer = (
+            torch.tensor(0.), torch.tensor(0.), torch.tensor(0.), torch.tensor(0.)
+        )
+    
+        network_output = self._network(inputs)
+        features = network_output["features"]
+        logits = network_output["logits"]
+    
+        # Classification loss
+        loss_clf = F.cross_entropy(logits / self.args["temp"], targets)
+    
+        # Task 0: No distillation or prototype-related loss
+        if self._cur_task == 0:
+            losses_all = {
+                "loss_clf": loss_clf,
+                "loss_fkd": loss_fkd,
+                "loss_proto": loss_proto,
+                "loss_transfer": loss_transfer,
+            }
+            return logits, losses_all
+    
+        # For tasks > 0
+        features_old = self.old_network_module_ptr.extract_vector(inputs)
+    
+        # Transfer loss
+        feature_transfer = self._network.transfer(features_old)["logits"]
+        loss_transfer = self.args["lambda_transfer"] * self.l2loss(features, feature_transfer)
+    
+        # Feature KD loss
+        loss_fkd = self.args["lambda_fkd"] * self.l2loss(features, features_old, mean=False)
+    
+        # Prototype loss
+        index = np.random.choice(range(self._known_classes), size=self.args["batch_size"], replace=True)
+        proto_features_raw = np.array(self._protos)[index]
+        proto_targets = index * 4
+    
+        proto_features = proto_features_raw + np.random.normal(0, 1, proto_features_raw.shape) * self._radius
+        proto_features = torch.from_numpy(proto_features).float().to(self._device, non_blocking=True)
+        proto_targets = torch.from_numpy(proto_targets).to(self._device, non_blocking=True)
+    
+        proto_features_transfer = self._network.transfer(proto_features)["logits"].detach().clone()
+        proto_logits = self._network_module_ptr.fc(proto_features_transfer)["logits"][:, :self._total_classes * 4]
+    
+        loss_proto = self.args["lambda_proto"] * F.cross_entropy(proto_logits / self.args["temp"], proto_targets)
+    
         losses_all = {
             "loss_clf": loss_clf,
             "loss_fkd": loss_fkd,
             "loss_proto": loss_proto,
             "loss_transfer": loss_transfer,
         }
+    
         return logits, losses_all
-
-    # For tasks > 0
-    features_old = self.old_network_module_ptr.extract_vector(inputs)
-
-    # Transfer loss
-    feature_transfer = self._network.transfer(features_old)["logits"]
-    loss_transfer = self.args["lambda_transfer"] * self.l2loss(features, feature_transfer)
-
-    # Feature KD loss
-    loss_fkd = self.args["lambda_fkd"] * self.l2loss(features, features_old, mean=False)
-
-    # Prototype loss
-    index = np.random.choice(range(self._known_classes), size=self.args["batch_size"], replace=True)
-    proto_features_raw = np.array(self._protos)[index]
-    proto_targets = index * 4
-
-    proto_features = proto_features_raw + np.random.normal(0, 1, proto_features_raw.shape) * self._radius
-    proto_features = torch.from_numpy(proto_features).float().to(self._device, non_blocking=True)
-    proto_targets = torch.from_numpy(proto_targets).to(self._device, non_blocking=True)
-
-    proto_features_transfer = self._network.transfer(proto_features)["logits"].detach().clone()
-    proto_logits = self._network_module_ptr.fc(proto_features_transfer)["logits"][:, :self._total_classes * 4]
-
-    loss_proto = self.args["lambda_proto"] * F.cross_entropy(proto_logits / self.args["temp"], proto_targets)
-
-    losses_all = {
-        "loss_clf": loss_clf,
-        "loss_fkd": loss_fkd,
-        "loss_proto": loss_proto,
-        "loss_transfer": loss_transfer,
-    }
-
-    return logits, losses_all
 
 
 
